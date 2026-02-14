@@ -17,7 +17,7 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
+# lib/  # removed - we need lib/ for bot
 lib64/
 parts/
 sdist/
@@ -57,3 +57,12 @@ wallets/
 # Backups
 *.bak
 *.backup
+
+# Deploy scripts with passwords
+deploy_to_vps.py
+fix_and_restart.py
+check_logs.py
+sync_to_vps.py
+
+# Bot state
+bot_state.json

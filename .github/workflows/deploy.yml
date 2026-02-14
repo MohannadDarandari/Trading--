@@ -1,0 +1,42 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to VPS via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: root
+          password: ${{ secrets.VPS_PASSWORD }}
+          script: |
+            export PATH=$HOME/.local/bin:$PATH
+            cd /root/polyclaw-bot
+
+            # Pull latest code
+            if [ -d ".git" ]; then
+              git pull origin main
+            else
+              # First time: clone
+              cd /root
+              rm -rf polyclaw-bot
+              git clone ${{ secrets.REPO_URL }} polyclaw-bot
+              cd polyclaw-bot
+              # Copy .env from backup
+              cp /root/.polyclaw-env-backup .env 2>/dev/null || true
+            fi
+
+            # Install dependencies
+            uv sync
+
+            # Restart bot
+            systemctl restart polyclaw-bot.service
+
+            # Wait and check
+            sleep 4
+            systemctl is-active polyclaw-bot.service
