@@ -1,0 +1,16 @@
+[Unit]
+Description=DarkOps Polymarket Trading Bot
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/trading-bot
+ExecStart=/home/ubuntu/trading-bot/venv/bin/python3 /home/ubuntu/trading-bot/engine.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/ubuntu/trading-bot/bot.log
+StandardError=append:/home/ubuntu/trading-bot/bot.log
+
+[Install]
+WantedBy=multi-user.target

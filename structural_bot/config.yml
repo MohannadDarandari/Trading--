@@ -1,0 +1,37 @@
+scan_interval_sec: 1
+max_requests_per_sec: 8
+max_total_cost_per_trade_usd: 5.0
+bankroll_usd: 100.0
+min_time_to_close_sec: 60
+spread_max: 0.03
+depth_levels: 10
+
+buffers:
+  fee_buffer: 0.006
+  slippage_buffer: 0.006
+  safety_margin: 0.010
+
+live_enabled: false
+
+risk:
+  max_open_exposure_pct: 0.10
+  max_trades_per_hour: 50
+  daily_stop_loss_pct: 0.02
+  partial_fill_streak_kill: 3
+  partial_fill_day_kill: 10
+  api_error_kill_10m: 5
+  latency_kill_ms: 500
+  latency_kill_window_sec: 60
+  thin_book_kill_scans: 20
+
+reporting:
+  telegram_interval_sec: 7200
+  daily_report_utc_hour: 0
+
+clob:
+  orderbook_path: /book
+  orders_path: /orders
+  order_path: /order
+  fills_path: /fills
+  balances_path: /balances
+  positions_path: /positions
