@@ -58,11 +58,20 @@ wallets/
 *.bak
 *.backup
 
-# Deploy scripts with passwords
+# Deploy scripts with passwords/tokens
 deploy_to_vps.py
+deploy_full.py
+deploy_london.py
 fix_and_restart.py
 check_logs.py
 sync_to_vps.py
+fix_vps_deps.py
+fix_vps_libs.py
+debug_vps.py
+restart_vps.py
+linode_list.py
+linode_reboot.py
+linode_rebuild.py
 
 # Bot state
 bot_state.json
