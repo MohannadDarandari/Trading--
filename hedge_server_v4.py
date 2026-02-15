@@ -60,9 +60,9 @@ MIN_EVENT_VOLUME_24H = float(os.getenv("MIN_EVENT_VOLUME_24H", "5000"))
 
 # Trading
 MIN_PROFIT_PER_DOLLAR = float(os.getenv("MIN_PROFIT", "0.003"))  # $0.003 min profit per $1
-AUTO_TRADE = os.getenv("AUTO_TRADE", "false").lower() == "true"
-TRADE_BUDGET = float(os.getenv("TRADE_BUDGET", "50"))  # $ per trade
-BANKROLL = float(os.getenv("BANKROLL", "100"))  # Total bankroll
+AUTO_TRADE = os.getenv("AUTO_TRADE", "true").lower() == "true"
+TRADE_BUDGET = float(os.getenv("TRADE_BUDGET", "2"))  # $ per trade
+BANKROLL = float(os.getenv("BANKROLL", "28"))  # Total bankroll
 
 # Fee on Polymarket (approximately)
 POLY_FEE = 0.02  # ~2% estimated fee per side
@@ -77,7 +77,7 @@ MIN_DEPTH_USD = float(os.getenv("MIN_DEPTH_USD", "20"))  # Min ask depth in USD
 # Kill switch limits
 KILL_PARTIAL_FILL_STREAK = int(os.getenv("KILL_PARTIAL_FILL_STREAK", "3"))
 KILL_PARTIAL_FILL_DAY = int(os.getenv("KILL_PARTIAL_FILL_DAY", "8"))
-KILL_API_ERRORS_10M = int(os.getenv("KILL_API_ERRORS_10M", "5"))
+KILL_API_ERRORS_10M = int(os.getenv("KILL_API_ERRORS_10M", "15"))
 KILL_LATENCY_MS = float(os.getenv("KILL_LATENCY_MS", "4000"))
 KILL_LATENCY_WINDOW_SEC = int(os.getenv("KILL_LATENCY_WINDOW_SEC", "120"))
 KILL_THIN_BOOK_SCANS = int(os.getenv("KILL_THIN_BOOK_SCANS", "4"))

@@ -187,8 +187,12 @@ class ClobClientWrapper:
             return None, str(e)
 
     def get_order_book(self, token_id: str) -> dict:
-        """Get order book for a token."""
-        return self.client.get_order_book(token_id)
+        """Get order book for a token (returns plain dict)."""
+        ob = self.client.get_order_book(token_id)
+        return {
+            "asks": [{"price": str(a.price), "size": str(a.size)} for a in (ob.asks or [])],
+            "bids": [{"price": str(b.price), "size": str(b.size)} for b in (ob.bids or [])],
+        }
 
     def get_orders(self) -> list:
         """Get all open orders."""
