@@ -136,35 +136,10 @@ THRESHOLD_ASSETS = {
 }
 
 # Known hedge patterns from AI research
+# NOTE: "complementary" type REMOVED — it's broken!
+# It only buys 2 of N outcomes, NOT a real hedge.
+# Only "exclusive" (can't both be true) and "superset" (A⊂B) are valid.
 KNOWN_PATTERNS = [
-    {
-        "name": "Fed Rates: Decrease vs Increase",
-        "search_a": "Fed decrease interest rates",
-        "search_b": "Fed increase interest rates",
-        "hedge_type": "complementary",
-        "desc": "Fed can decrease OR increase. Buy YES decrease + NO increase.",
-    },
-    {
-        "name": "Fed Rates: No Change vs Increase",
-        "search_a": "no change in Fed interest rates",
-        "search_b": "Fed increase interest rates",
-        "hedge_type": "complementary",
-        "desc": "If Fed doesn't change, they won't increase.",
-    },
-    {
-        "name": "Trump Nom: Shelton vs No One",
-        "search_a": "Trump nominate Judy Shelton",
-        "search_b": "Trump nominate no one",
-        "hedge_type": "exclusive",
-        "desc": "Can't nominate Shelton AND no one at the same time.",
-    },
-    {
-        "name": "Trump Nom: Miran vs No One",
-        "search_a": "Trump nominate Stephen Miran",
-        "search_b": "Trump nominate no one",
-        "hedge_type": "exclusive",
-        "desc": "Can't nominate Miran AND no one at the same time.",
-    },
     {
         "name": "Iran Strike Timeframe",
         "search_a": "strikes Iran by February",
@@ -631,23 +606,43 @@ class EventGroupScanner:
         self.gamma = gamma
 
     def _is_exclusive_event(self, event: MarketGroup, markets: list[Market]) -> bool:
+        """Check if event outcomes are mutually exclusive and exhaustive.
+        
+        KEY INSIGHT: For a REAL hedge, exactly ONE outcome must win.
+        We verify this by checking that sum of YES prices ≈ 1.0.
+        If prices sum to ~1.0, the market treats them as exhaustive.
+        """
         title = (event.title or "").lower()
         desc = (event.description or "").lower()
+        
+        # Step 1: check if YES prices sum to ~1.0 (strong signal of exclusivity)
+        total_yes = sum(m.yes_price for m in markets)
+        prices_look_exclusive = 0.85 <= total_yes <= 1.15
+        
+        # Step 2: keyword check (broader list)
         keywords = [
             "winner", "nominee", "who will", "which", "election", "primary",
             "champion", "win", "wins", "best", "award", "oscar", "grammy",
             "world cup", "super bowl", "nba", "nhl", "ufc", "formula 1",
+            "interest rate", "fed ", "fomc", "rate decision", "bps",
+            "how many", "how much", "range", "between",
+            "president", "governor", "mayor", "senate", "house",
+            "next", "first", "mvp", "scoring",
+            "deport", "tariff", "executive order",
         ]
-
         text_match = any(k in title or k in desc for k in keywords)
-        if not text_match:
+        
+        # Accept if EITHER prices look exclusive OR keywords match
+        # But prices MUST be in a reasonable range regardless
+        if not prices_look_exclusive:
             return False
-
-        total_yes = sum(m.yes_price for m in markets)
-        if total_yes < 0.8 or total_yes > 1.2:
-            return False
-
-        return True
+        
+        # If prices are very close to 1.0 (0.90-1.10), trust them even without keywords
+        if 0.90 <= total_yes <= 1.10:
+            return True
+        
+        # For wider range (0.85-0.90 or 1.10-1.15), require keyword confirmation
+        return text_match
 
     async def scan(self) -> tuple[list[HedgeOpportunity], int]:
         """Scan event groups for arbitrage. Returns (opportunities, markets_checked)."""
@@ -946,28 +941,10 @@ class KnownPatternScanner:
 
                 h_type = pat.get("hedge_type", "complementary")
 
+                # "complementary" type REMOVED — it's broken!
+                # It only buys 2 of N outcomes, NOT a real hedge.
                 if h_type == "complementary":
-                    cost = market_a.yes_price + market_b.yes_price
-                    if cost > 0 and cost < 1.0:
-                        net_p = (1.0 - cost) / cost - POLY_FEE * 2
-                        if net_p > MIN_PROFIT_PER_DOLLAR:
-                            opp = HedgeOpportunity(
-                                name=f"🔗 {pat['name']}", scanner="known_pattern",
-                                hedge_type=h_type,
-                                markets=[
-                                    {"id": market_a.id, "question": market_a.question,
-                                     "position": "YES", "price": market_a.yes_price,
-                                     "token_id": market_a.yes_token_id, "volume": market_a.volume_24h},
-                                    {"id": market_b.id, "question": market_b.question,
-                                     "position": "YES", "price": market_b.yes_price,
-                                     "token_id": market_b.yes_token_id, "volume": market_b.volume_24h},
-                                ],
-                                total_cost=cost, min_payout=1.0, max_payout=1.0,
-                                guaranteed_profit=1.0 - cost,
-                                best_case_profit=1.0 - cost,
-                                net_profit_per_dollar=net_p, confidence="GUARANTEED",
-                            )
-                            opportunities.append(opp)
+                    continue  # SKIP — not a valid hedge
 
                 elif h_type == "exclusive":
                     cost = market_a.no_price + market_b.no_price
