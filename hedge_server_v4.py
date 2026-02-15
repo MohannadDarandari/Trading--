@@ -1223,7 +1223,29 @@ class HedgeServer:
             report["errors"].append("invalid_cost")
             return report
 
+        # Polymarket minimums: 5 shares per order, $1 for marketable orders
+        MIN_SHARES = 5.0
+        MIN_MARKETABLE_USD = 1.0
+
         scale = trade_size / opp.total_cost
+
+        # Pre-check: ensure every leg meets minimums at this scale
+        # If not, bump scale up; if budget would be too high, skip hedge
+        for leg in opp.markets:
+            if leg["price"] > 0:
+                needed_for_shares = MIN_SHARES  # shares needed
+                needed_for_usd = MIN_MARKETABLE_USD / leg["price"]  # shares for $1 min
+                min_leg_scale = max(needed_for_shares, needed_for_usd)
+                if scale < min_leg_scale:
+                    scale = min_leg_scale
+
+        actual_budget = scale * opp.total_cost
+        if actual_budget > BANKROLL * KILL_MAX_EXPOSURE_PCT:
+            report["errors"].append(
+                f"min_order_size_requires_${actual_budget:.2f}_exceeds_limit"
+            )
+            return report
+
         legs_ok = 0
 
         for leg in opp.markets:
@@ -1232,8 +1254,8 @@ class HedgeServer:
                 report["errors"].append(f"no_token_id for {leg['question'][:30]}")
                 continue
 
-            leg_amount_usd = leg["price"] * scale
-            leg_size = leg_amount_usd / leg["price"] if leg["price"] > 0 else 0
+            leg_size = scale  # shares per leg (same for all, since hedge buys 'scale' units)
+            leg_amount_usd = leg["price"] * leg_size
 
             # VWAP depth check
             depth_ok, depth_reason = self._check_depth(token_id, leg_amount_usd)
