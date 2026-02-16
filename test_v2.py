@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """Quick test of BTC predictor v3."""
-from btc_predictor import PredictionEngine
+from btc_predictor import Brain
 
-engine = PredictionEngine()
+engine = Brain()
 pred = engine.predict()
 
 if pred:
     print(f"Direction:  {pred.direction}")
     print(f"Confidence: {pred.confidence}%")
-    print(f"Tier:       {pred.tier}")
     print(f"BTC Price:  ${pred.price:,.2f}")
+    print(f"Window:     {pred.window_start} → {pred.window_end}")
     print()
     print("Reasons:")
     for r in pred.reasons:

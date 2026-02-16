@@ -1,60 +1,35 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║  🎯 BTC 5-MIN DIRECTION PREDICTOR v3                           ║
-║  Pure Technical Analysis — NO Polymarket data                   ║
-║  Predicts: Will BTC go UP or DOWN in the next 5 minutes?        ║
+║  🎯 BTC 5-MIN PREDICTOR v4 — ALWAYS SIGNALS                   ║
+║  Every 5 minutes = 1 prediction. No skipping.                   ║
+║  Deep sources: Binance spot+futures, liquidations,              ║
+║  whale trades, funding, open interest, CVD, order flow          ║
 ╚══════════════════════════════════════════════════════════════════╝
-
-HOW IT WORKS:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-• Every 5 minutes Polymarket opens a new "Up or Down" market
-• PRICE TO BEAT = BTC price at window start
-• If BTC is HIGHER at window end → Up wins
-• If BTC is LOWER at window end → Down wins
-
-THIS BOT:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-• Analyzes BTC on its own (NO Polymarket prices)
-• Uses pure technical analysis to predict 5-min direction
-• Signals 60s BEFORE each window so you can buy at ~50¢
-• Only signals when multiple indicators strongly agree
-
-DATA SOURCES (all from Binance):
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-• 1-min candles (200) — main analysis timeframe
-• 5-min candles (60)  — trend confirmation
-• 15-min candles (30) — macro trend
-• Order book (50 levels) — buy/sell walls
-• Aggregated trades (1000) — who's aggressive buyer/seller
-• Funding rate — market sentiment
-• Taker buy/sell ratio — aggression direction
 """
 
 import os, sys, json, time, math, traceback
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Dict
-
 import httpx
 
-# ═══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════
 # CONFIG
-# ═══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════
 
 TELEGRAM_TOKEN = "8331165268:AAEA84wTDNeFuPhRJkjLiUqxxkaPEuL2B-o"
 TELEGRAM_CHAT_IDS = ["1688623770", "1675476723"]
 
-BINANCE_SPOT  = "https://api.binance.com/api/v3"
-BINANCE_FUTS  = "https://fapi.binance.com"
+BINANCE      = "https://api.binance.com/api/v3"
+BINANCE_FUTS = "https://fapi.binance.com"
 
-SCAN_INTERVAL    = 15     # seconds between scans
-SIGNAL_LEAD_TIME = 60     # signal this many seconds BEFORE window
-MIN_CONFIDENCE   = 70     # skip below this
+# Signal 60 seconds BEFORE each 5-min window
+LEAD_TIME = 60
 
-# ═══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════
 # DATA
-# ═══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════
 
 @dataclass
 class Candle:
@@ -62,27 +37,23 @@ class Candle:
 
 @dataclass
 class Prediction:
-    direction: str        # UP / DOWN
-    confidence: float     # 0-100
-    tier: str             # SKIP / WATCH / SIGNAL / SNIPER
-    price: float          # BTC price now
+    direction: str       # UP / DOWN
+    confidence: float    # 50-99
+    price: float
     reasons: List[str]
-    scores: Dict          # raw indicator scores
+    scores: Dict
     window_start: datetime
     window_end: datetime
 
-# ═══════════════════════════════════════════════════════════════
-# BINANCE DATA ENGINE
-# ═══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════
+# DEEP DATA ENGINE — all the "under the table" sources
+# ═══════════════════════════════════════════════════════
 
-class DataEngine:
-    """All data comes from Binance only."""
-
+class DeepData:
     def __init__(self):
-        self.c = httpx.Client(timeout=10)
+        self.c = httpx.Client(timeout=8)
         self._cache: Dict[str, Tuple[float, object]] = {}
 
-    # ---------- helpers ----------
     def _get(self, url, params=None, ttl=4):
         key = f"{url}|{json.dumps(params or {}, sort_keys=True)}"
         now = time.time()
@@ -91,709 +62,552 @@ class DataEngine:
         try:
             r = self.c.get(url, params=params)
             if r.status_code == 200:
-                data = r.json()
-                self._cache[key] = (now, data)
-                return data
-        except Exception as e:
-            print(f"    ⚠ API {url.split('/')[-1]}: {e}")
-        return self._cache.get(key, (0, None))[1]
+                d = r.json()
+                self._cache[key] = (now, d)
+                return d
+        except:
+            pass
+        cached = self._cache.get(key)
+        return cached[1] if cached else None
 
-    # ---------- candles ----------
-    def klines(self, interval="1m", limit=200) -> List[Candle]:
-        raw = self._get(f"{BINANCE_SPOT}/klines",
-                        {"symbol": "BTCUSDT", "interval": interval, "limit": limit})
-        if not raw:
-            return []
-        return [Candle(k[0]/1000, float(k[1]), float(k[2]),
-                       float(k[3]), float(k[4]), float(k[5])) for k in raw]
+    # ── Spot ──
+    def klines(self, tf="1m", n=200):
+        raw = self._get(f"{BINANCE}/klines", {"symbol":"BTCUSDT","interval":tf,"limit":n})
+        return [Candle(k[0]/1000,float(k[1]),float(k[2]),float(k[3]),float(k[4]),float(k[5])) for k in (raw or [])]
 
-    # ---------- price ----------
-    def price(self) -> float:
-        d = self._get(f"{BINANCE_SPOT}/ticker/price", {"symbol": "BTCUSDT"}, ttl=2)
-        return float(d["price"]) if d else 0.0
+    def price(self):
+        d = self._get(f"{BINANCE}/ticker/price", {"symbol":"BTCUSDT"}, 2)
+        return float(d["price"]) if d else 0
 
-    # ---------- order book ----------
-    def orderbook(self, limit=50):
-        d = self._get(f"{BINANCE_SPOT}/depth", {"symbol": "BTCUSDT", "limit": limit})
-        if not d:
-            return [], []
-        return d.get("bids", []), d.get("asks", [])
+    def book(self, n=100):
+        d = self._get(f"{BINANCE}/depth", {"symbol":"BTCUSDT","limit":n})
+        return (d.get("bids",[]), d.get("asks",[])) if d else ([],[])
 
-    # ---------- aggregated trades ----------
-    def agg_trades(self, limit=1000) -> list:
-        return self._get(f"{BINANCE_SPOT}/aggTrades",
-                         {"symbol": "BTCUSDT", "limit": limit}) or []
+    def agg_trades(self, n=1000):
+        return self._get(f"{BINANCE}/aggTrades", {"symbol":"BTCUSDT","limit":n}) or []
 
-    # ---------- funding rate ----------
-    def funding_rate(self) -> Optional[float]:
-        d = self._get(f"{BINANCE_FUTS}/fapi/v1/fundingRate",
-                      {"symbol": "BTCUSDT", "limit": 1}, ttl=30)
-        if d and len(d):
-            return float(d[-1]["fundingRate"])
-        return None
+    # ── Futures — the REAL hidden data ──
+    def funding(self):
+        d = self._get(f"{BINANCE_FUTS}/fapi/v1/fundingRate", {"symbol":"BTCUSDT","limit":1}, 30)
+        return float(d[-1]["fundingRate"]) if d else None
 
-    # ---------- taker buy/sell ----------
-    def taker_ratio(self) -> Optional[float]:
-        d = self._get(f"{BINANCE_FUTS}/futures/data/takerlongshortRatio",
-                      {"symbol": "BTCUSDT", "period": "5m", "limit": 1}, ttl=15)
-        if d and len(d):
-            bv = float(d[-1].get("buyVol", 0))
-            sv = float(d[-1].get("sellVol", 0))
-            total = bv + sv
-            return (bv - sv) / total if total else 0.0
-        return None
+    def open_interest(self):
+        d = self._get(f"{BINANCE_FUTS}/fapi/v1/openInterest", {"symbol":"BTCUSDT"}, 10)
+        return float(d["openInterest"]) if d else None
 
-    # ---------- long/short ratio ----------
-    def long_short(self) -> Optional[float]:
+    def oi_history(self):
+        """OI change over last periods — shows positioning shifts."""
+        d = self._get(f"{BINANCE_FUTS}/futures/data/openInterestHist",
+                      {"symbol":"BTCUSDT","period":"5m","limit":12}, 15)
+        return d or []
+
+    def long_short_ratio(self):
         d = self._get(f"{BINANCE_FUTS}/futures/data/topLongShortAccountRatio",
-                      {"symbol": "BTCUSDT", "period": "5m", "limit": 1}, ttl=15)
-        if d and len(d):
-            return float(d[-1]["longShortRatio"])
-        return None
+                      {"symbol":"BTCUSDT","period":"5m","limit":6}, 10)
+        return d or []
+
+    def taker_buy_sell(self):
+        d = self._get(f"{BINANCE_FUTS}/futures/data/takerlongshortRatio",
+                      {"symbol":"BTCUSDT","period":"5m","limit":6}, 10)
+        return d or []
+
+    def liquidations_proxy(self):
+        """Use futures klines volume spike as liquidation proxy."""
+        d = self._get(f"{BINANCE_FUTS}/fapi/v1/klines",
+                      {"symbol":"BTCUSDT","interval":"1m","limit":10}, 5)
+        if not d: return 0, 0
+        # Taker buy base asset volume is index 9
+        recent_vols = [float(k[5]) for k in d]  # quote volume
+        taker_buys  = [float(k[9]) for k in d]  # taker buy volume
+        avg = sum(recent_vols)/len(recent_vols) if recent_vols else 1
+        last = recent_vols[-1] if recent_vols else 0
+        taker_buy_pct = sum(taker_buys)/sum(recent_vols) if sum(recent_vols) else 0.5
+        return last/avg if avg else 1, taker_buy_pct
+
+    def futures_klines(self, tf="1m", n=60):
+        raw = self._get(f"{BINANCE_FUTS}/fapi/v1/klines",
+                        {"symbol":"BTCUSDT","interval":tf,"limit":n}, 5)
+        return [Candle(k[0]/1000,float(k[1]),float(k[2]),float(k[3]),float(k[4]),float(k[5])) for k in (raw or [])]
+
+    def spot_futures_spread(self):
+        """Premium of futures over spot — tells you leverage direction."""
+        spot = self.price()
+        futs = self._get(f"{BINANCE_FUTS}/fapi/v1/ticker/price", {"symbol":"BTCUSDT"}, 3)
+        if futs and spot:
+            fp = float(futs["price"])
+            return (fp - spot) / spot * 10000  # basis in bps
+        return 0
 
 
-# ═══════════════════════════════════════════════════════════════
-# INDICATOR LIBRARY
-# ═══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════
+# INDICATORS
+# ═══════════════════════════════════════════════════════
 
-def _ema(data, p):
-    if not data: return []
-    m = 2/(p+1); r = [data[0]]
-    for v in data[1:]: r.append((v-r[-1])*m + r[-1])
+def _ema(d, p):
+    if not d: return []
+    m=2/(p+1); r=[d[0]]
+    for v in d[1:]: r.append((v-r[-1])*m+r[-1])
     return r
 
-def _rsi(closes, p=14):
-    if len(closes) < p+1: return 50.0
-    d = [closes[i]-closes[i-1] for i in range(1, len(closes))]
-    g = [max(x,0) for x in d]; l = [max(-x,0) for x in d]
-    ag = sum(g[-p:])/p; al = sum(l[-p:])/p
-    if al == 0: return 100.0
-    return 100 - 100/(1 + ag/al)
+def _rsi(c, p=14):
+    if len(c)<p+1: return 50
+    d=[c[i]-c[i-1] for i in range(1,len(c))]
+    g=[max(x,0) for x in d]; l=[max(-x,0) for x in d]
+    ag=sum(g[-p:])/p; al=sum(l[-p:])/p
+    return 100-100/(1+ag/al) if al else 100
 
-def _macd(closes):
-    if len(closes) < 26: return 0,0,0
-    e12 = _ema(closes,12); e26 = _ema(closes,26)
-    ml = [e12[i]-e26[i] for i in range(len(closes))]
-    sl = _ema(ml, 9)
-    return ml[-1], sl[-1], ml[-1]-sl[-1]
+def _macd_hist(c):
+    if len(c)<26: return 0
+    e12=_ema(c,12); e26=_ema(c,26)
+    ml=[e12[i]-e26[i] for i in range(len(c))]
+    sl=_ema(ml,9)
+    return ml[-1]-sl[-1]
 
-def _bb_pos(closes, p=20):
-    if len(closes)<p: return 0.5
-    w = closes[-p:]; m = sum(w)/p
-    s = math.sqrt(sum((x-m)**2 for x in w)/p) or 1
-    u = m+2*s; lo = m-2*s
-    return (closes[-1]-lo)/(u-lo) if u!=lo else 0.5
+def _bb_pos(c, p=20):
+    if len(c)<p: return 0.5
+    w=c[-p:]; m=sum(w)/p
+    s=math.sqrt(sum((x-m)**2 for x in w)/p) or 1
+    return (c[-1]-(m-2*s))/((m+2*s)-(m-2*s)) if (m+2*s)!=(m-2*s) else 0.5
 
-def _stoch_rsi(closes, p=14):
-    if len(closes)<p*2: return 50
-    rsis = [_rsi(closes[:i], p) for i in range(p, len(closes)+1)]
-    if len(rsis)<p: return 50
-    r = rsis[-p:]; mn,mx = min(r),max(r)
-    return (rsis[-1]-mn)/(mx-mn)*100 if mx!=mn else 50
+def _stoch_rsi(c, p=14):
+    if len(c)<p*2: return 50
+    rs=[_rsi(c[:i],p) for i in range(p,len(c)+1)]
+    if len(rs)<p: return 50
+    r=rs[-p:]; mn,mx=min(r),max(r)
+    return (rs[-1]-mn)/(mx-mn)*100 if mx!=mn else 50
 
 def _atr(candles, p=14):
     if len(candles)<p+1: return 0
-    trs = [max(candles[i].h-candles[i].l,
-               abs(candles[i].h-candles[i-1].c),
-               abs(candles[i].l-candles[i-1].c)) for i in range(1,len(candles))]
+    trs=[max(candles[i].h-candles[i].l, abs(candles[i].h-candles[i-1].c),
+             abs(candles[i].l-candles[i-1].c)) for i in range(1,len(candles))]
     return sum(trs[-p:])/p
 
-def _adx(candles, p=14):
-    if len(candles)<p*2: return 25, 0, 0
-    pdm,mdm,trs = [],[],[]
+def _adx_dir(candles, p=14):
+    """Returns (adx, +DI > -DI)."""
+    if len(candles)<p*2: return 25, True
+    pdm,mdm,trs=[],[],[]
     for i in range(1,len(candles)):
-        up = candles[i].h-candles[i-1].h
-        dn = candles[i-1].l-candles[i].l
+        up=candles[i].h-candles[i-1].h; dn=candles[i-1].l-candles[i].l
         pdm.append(up if up>dn and up>0 else 0)
         mdm.append(dn if dn>up and dn>0 else 0)
-        trs.append(max(candles[i].h-candles[i].l,
-                       abs(candles[i].h-candles[i-1].c),
+        trs.append(max(candles[i].h-candles[i].l, abs(candles[i].h-candles[i-1].c),
                        abs(candles[i].l-candles[i-1].c)))
-    at = sum(trs[-p:])/p
-    if at==0: return 0,0,0
-    ap = sum(pdm[-p:])/p; am = sum(mdm[-p:])/p
-    pdi = ap/at*100; mdi = am/at*100
-    dx = abs(pdi-mdi)/(pdi+mdi)*100 if pdi+mdi else 0
-    return dx, pdi, mdi
+    at=sum(trs[-p:])/p
+    if at==0: return 0, True
+    ap=sum(pdm[-p:])/p; am=sum(mdm[-p:])/p
+    pdi=ap/at*100; mdi=am/at*100
+    dx=abs(pdi-mdi)/(pdi+mdi)*100 if pdi+mdi else 0
+    return dx, pdi>mdi
 
-def _vwap(candles, p=30):
-    r = candles[-p:]
-    tv = sum(c.v for c in r)
-    if tv==0: return r[-1].c
-    return sum(((c.h+c.l+c.c)/3)*c.v for c in r)/tv
-
-def _williams(candles, p=14):
-    if len(candles)<p: return -50
-    r = candles[-p:]
-    hi = max(c.h for c in r); lo = min(c.l for c in r)
-    return (hi-candles[-1].c)/(hi-lo)*-100 if hi!=lo else -50
-
-def _cci(candles, p=20):
-    if len(candles)<p: return 0
-    r = candles[-p:]
-    tp = [(c.h+c.l+c.c)/3 for c in r]; m = sum(tp)/p
-    md = sum(abs(t-m) for t in tp)/p
-    return (tp[-1]-m)/(0.015*md) if md else 0
-
-def _obv_slope(candles, short=5, long_=20):
-    obv = [0.0]
+def _obv_dir(candles, s=5, l=20):
+    obv=[0.0]
     for i in range(1,len(candles)):
         if candles[i].c>candles[i-1].c: obv.append(obv[-1]+candles[i].v)
         elif candles[i].c<candles[i-1].c: obv.append(obv[-1]-candles[i].v)
         else: obv.append(obv[-1])
-    if len(obv)<long_: return 0
-    sa = sum(obv[-short:])/short
-    la = sum(obv[-long_:])/long_
-    return 1 if sa>la else (-1 if sa<la else 0)
+    if len(obv)<l: return 0
+    return 1 if sum(obv[-s:])/s > sum(obv[-l:])/l else -1
+
+def _cvd(trades):
+    """Cumulative Volume Delta from trades. Positive = buyers aggressive."""
+    if not trades: return 0
+    delta = 0
+    for t in trades:
+        q = float(t.get("q", 0))
+        if t.get("m"):  # maker is buyer → taker SOLD
+            delta -= q
+        else:  # taker bought
+            delta += q
+    return delta
 
 
-# ═══════════════════════════════════════════════════════════════
-# PREDICTION ENGINE
-# ═══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════
+# 🧠 THE BRAIN — predicts every 5 minutes, NO SKIP
+# ═══════════════════════════════════════════════════════
 
-class PredictionEngine:
-    """
-    Pure BTC technical analysis.
-    Outputs a weighted score:
-      > 0 = UP prediction
-      < 0 = DOWN prediction
-      magnitude = confidence
-
-    INDICATOR GROUPS (each scored -10 to +10):
-    ─────────────────────────────────────────
-    A. Trend      : EMA cross, EMA50, ADX direction
-    B. Momentum   : RSI, MACD hist, recent candle direction
-    C. Mean-Rev   : Bollinger, StochRSI, Williams%R, CCI
-    D. Volume     : OBV slope, volume spike, buy/sell ratio
-    E. Order Flow : book imbalance, trade aggression
-    F. Multi-TF   : 5m + 15m trend agreement
-    G. Futures    : funding rate, taker ratio, L/S ratio
-    """
-
+class Brain:
     def __init__(self):
-        self.data = DataEngine()
+        self.data = DeepData()
 
-    def predict(self) -> Optional[Prediction]:
-        c1  = self.data.klines("1m", 200)
-        c5  = self.data.klines("5m", 60)
-        c15 = self.data.klines("15m", 30)
-        if len(c1) < 50:
-            return None
+    def predict(self) -> Prediction:
+        # ── Fetch everything in parallel-ish ──
+        c1   = self.data.klines("1m", 200)
+        c5   = self.data.klines("5m", 60)
+        c15  = self.data.klines("15m", 30)
+        fc1  = self.data.futures_klines("1m", 30)  # futures candles
 
-        price = c1[-1].c
+        price = self.data.price() or (c1[-1].c if c1 else 0)
         cl1  = [c.c for c in c1]
-        cl5  = [c.c for c in c5]  if c5  else cl1
+        cl5  = [c.c for c in c5] if c5 else cl1
         cl15 = [c.c for c in c15] if c15 else cl1
 
-        scores: Dict[str, float] = {}   # each -10..+10
-        reasons: List[str] = []
+        S = {}   # scores by group
+        R = []   # reasons
 
-        # ─────────────────────────────────────
-        # A. TREND (weight = high)
-        # ─────────────────────────────────────
-        e9  = _ema(cl1, 9)
-        e21 = _ema(cl1, 21)
-        e50 = _ema(cl1, 50)
+        # ═══════════════════════════════════════
+        # 1. TREND (weight 3)
+        # ═══════════════════════════════════════
+        s = 0
+        if len(cl1) > 21:
+            e9 = _ema(cl1,9); e21 = _ema(cl1,21); e50 = _ema(cl1,50)
+            gap = (e9[-1]-e21[-1])/price*10000
+            if gap > 3: s += 4; R.append(f"EMA9>21 +{gap:.0f}bps")
+            elif gap < -3: s -= 4; R.append(f"EMA9<21 {gap:.0f}bps")
+            # Fresh cross
+            if len(e9)>2:
+                pg = e9[-2]-e21[-2]; cg = e9[-1]-e21[-1]
+                if pg<=0<cg: s += 3; R.append("🔥 Bullish EMA cross!")
+                elif pg>=0>cg: s -= 3; R.append("🔥 Bearish EMA cross!")
+            if price > e50[-1]: s += 1
+            else: s -= 1
+            adx, up = _adx_dir(c1)
+            if adx > 25:
+                s += 2 if up else -2
+                R.append(f"ADX {adx:.0f} ({'↑' if up else '↓'})")
+        S["trend"] = max(-10,min(10,s))
 
-        ema_gap_bps = (e9[-1] - e21[-1]) / price * 10000
-        trend_score = 0.0
-
-        # EMA 9/21 cross direction
-        if ema_gap_bps > 3:
-            trend_score += 4
-            reasons.append(f"EMA9>21 (+{ema_gap_bps:.1f}bps)")
-        elif ema_gap_bps < -3:
-            trend_score -= 4
-            reasons.append(f"EMA9<21 ({ema_gap_bps:.1f}bps)")
-        else:
-            reasons.append("EMA9≈21 (flat)")
-
-        # Fresh cross? (huge signal)
-        if len(e9)>2 and len(e21)>2:
-            prev_gap = e9[-2] - e21[-2]
-            curr_gap = e9[-1] - e21[-1]
-            if prev_gap <= 0 < curr_gap:
-                trend_score += 3
-                reasons.append("🔥 Fresh bullish EMA cross!")
-            elif prev_gap >= 0 > curr_gap:
-                trend_score -= 3
-                reasons.append("🔥 Fresh bearish EMA cross!")
-
-        # Price vs EMA50
-        if price > e50[-1] * 1.0005:
-            trend_score += 2
-        elif price < e50[-1] * 0.9995:
-            trend_score -= 2
-
-        # ADX — trend strength
-        adx_val, pdi, mdi = _adx(c1)
-        if adx_val > 25:
-            # Strong trend — amplify direction
-            if pdi > mdi:
-                trend_score += 2
-                reasons.append(f"ADX {adx_val:.0f} (strong ↑ trend)")
-            else:
-                trend_score -= 2
-                reasons.append(f"ADX {adx_val:.0f} (strong ↓ trend)")
-
-        scores["trend"] = max(-10, min(10, trend_score))
-
-        # ─────────────────────────────────────
-        # B. MOMENTUM
-        # ─────────────────────────────────────
-        mom_score = 0.0
-
-        # RSI(14)
+        # ═══════════════════════════════════════
+        # 2. MOMENTUM (weight 3)
+        # ═══════════════════════════════════════
+        s = 0
         rsi14 = _rsi(cl1, 14)
         rsi7  = _rsi(cl1, 7)
-        if rsi14 > 65: mom_score += 2; reasons.append(f"RSI14 bullish ({rsi14:.0f})")
-        elif rsi14 < 35: mom_score -= 2; reasons.append(f"RSI14 bearish ({rsi14:.0f})")
+        if rsi14 > 60: s += 2
+        elif rsi14 < 40: s -= 2
+        if rsi7 > 70: s += 2
+        elif rsi7 < 30: s -= 2
+        R.append(f"RSI14={rsi14:.0f} RSI7={rsi7:.0f}")
 
-        # RSI(7) — fast
-        if rsi7 > 75: mom_score += 2
-        elif rsi7 < 25: mom_score -= 2
+        h = _macd_hist(cl1)
+        if h > 0: s += 2
+        else: s -= 2
+        if len(cl1)>27:
+            ph = _macd_hist(cl1[:-1])
+            if h > 0 and h > ph: s += 1; R.append("MACD accel ↑")
+            elif h < 0 and h < ph: s -= 1; R.append("MACD accel ↓")
 
-        # MACD histogram
-        _, _, hist = _macd(cl1)
-        if hist > 0:
-            mom_score += 2
-            if len(cl1) > 27:
-                _, _, prev_hist = _macd(cl1[:-1])
-                if hist > prev_hist:
-                    mom_score += 1
-                    reasons.append("MACD accelerating ↑")
-                else:
-                    reasons.append("MACD ↑ but slowing")
-        else:
-            mom_score -= 2
-            if len(cl1) > 27:
-                _, _, prev_hist = _macd(cl1[:-1])
-                if hist < prev_hist:
-                    mom_score -= 1
-                    reasons.append("MACD accelerating ↓")
-                else:
-                    reasons.append("MACD ↓ but slowing")
+        # Last 5 candles
+        if len(c1) >= 5:
+            gr = sum(1 for c in c1[-5:] if c.c > c.o)
+            if gr >= 4: s += 2; R.append(f"{gr}/5 green")
+            elif gr <= 1: s -= 2; R.append(f"{5-gr}/5 red")
 
-        # Last 5 candles direction
-        greens = sum(1 for c in c1[-5:] if c.c > c.o)
-        if greens >= 4:
-            mom_score += 2
-            reasons.append(f"{greens}/5 green candles")
-        elif greens <= 1:
-            mom_score -= 2
-            reasons.append(f"{5-greens}/5 red candles")
-
-        # Price change last 3 minutes
+        # Recent price change (3m)
         if len(cl1) >= 4:
-            chg3 = (cl1[-1] - cl1[-4]) / cl1[-4] * 10000  # bps
-            if chg3 > 5:
-                mom_score += 2
-                reasons.append(f"Last 3m: +{chg3:.0f}bps ↑")
-            elif chg3 < -5:
-                mom_score -= 2
-                reasons.append(f"Last 3m: {chg3:.0f}bps ↓")
+            ch = (cl1[-1]-cl1[-4])/cl1[-4]*10000
+            if ch > 5: s += 2; R.append(f"3m: +{ch:.0f}bps")
+            elif ch < -5: s -= 2; R.append(f"3m: {ch:.0f}bps")
+        S["momentum"] = max(-10,min(10,s))
 
-        scores["momentum"] = max(-10, min(10, mom_score))
-
-        # ─────────────────────────────────────
-        # C. MEAN REVERSION
-        # ─────────────────────────────────────
-        mr_score = 0.0
-
-        # Bollinger position
+        # ═══════════════════════════════════════
+        # 3. MEAN REVERSION (weight 1.5)
+        # ═══════════════════════════════════════
+        s = 0
         bb = _bb_pos(cl1)
-        if bb > 0.90:
-            mr_score -= 3  # overbought → may revert down
-            reasons.append(f"Bollinger top ({bb:.0%}) ⚠")
-        elif bb < 0.10:
-            mr_score += 3  # oversold → may revert up
-            reasons.append(f"Bollinger bottom ({bb:.0%}) ⚠")
-        elif bb > 0.70:
-            mr_score -= 1
-        elif bb < 0.30:
-            mr_score += 1
+        if bb > 0.90: s -= 3; R.append(f"BB top {bb:.0%}")
+        elif bb < 0.10: s += 3; R.append(f"BB bottom {bb:.0%}")
+        elif bb > 0.75: s -= 1
+        elif bb < 0.25: s += 1
 
-        # StochRSI
-        stoch = _stoch_rsi(cl1)
-        if stoch > 85: mr_score -= 2
-        elif stoch < 15: mr_score += 2
+        sr = _stoch_rsi(cl1)
+        if sr > 85: s -= 2
+        elif sr < 15: s += 2
+        S["mean_rev"] = max(-10,min(10,s))
 
-        # Williams %R
-        wr = _williams(c1)
-        if wr > -10: mr_score -= 2; reasons.append(f"Williams peaked ({wr:.0f})")
-        elif wr < -90: mr_score += 2; reasons.append(f"Williams bottomed ({wr:.0f})")
-
-        # CCI
-        cci = _cci(c1)
-        if cci > 150: mr_score -= 2; reasons.append(f"CCI extreme ({cci:.0f})")
-        elif cci < -150: mr_score += 2; reasons.append(f"CCI extreme ({cci:.0f})")
-
-        scores["mean_rev"] = max(-10, min(10, mr_score))
-
-        # ─────────────────────────────────────
-        # D. VOLUME
-        # ─────────────────────────────────────
-        vol_score = 0.0
-
-        # OBV slope
-        obv_dir = _obv_slope(c1)
-        if obv_dir > 0:
-            vol_score += 2
-            reasons.append("OBV ↑ (volume confirms)")
-        elif obv_dir < 0:
-            vol_score -= 2
-            reasons.append("OBV ↓ (volume confirms)")
-
-        # Volume spike on last candle
-        if len(c1) > 20:
-            avg_v = sum(c.v for c in c1[-21:-1])/20
-            cur_v = c1[-1].v
-            vr = cur_v / avg_v if avg_v else 1
-            if vr > 2.5:
-                d = 1 if c1[-1].c > c1[-1].o else -1
-                vol_score += 3 * d
-                reasons.append(f"🔥 Volume spike {vr:.1f}x ({'↑' if d>0 else '↓'})")
-            elif vr > 1.5:
-                d = 1 if c1[-1].c > c1[-1].o else -1
-                vol_score += 1 * d
-
-        # VWAP distance
-        vwap = _vwap(c1, 30)
-        vwap_dist_bps = (price - vwap) / price * 10000
-        if vwap_dist_bps > 5:
-            vol_score += 1  # above VWAP → bullish
-        elif vwap_dist_bps < -5:
-            vol_score -= 1
-
-        scores["volume"] = max(-10, min(10, vol_score))
-
-        # ─────────────────────────────────────
-        # E. ORDER FLOW
-        # ─────────────────────────────────────
-        of_score = 0.0
+        # ═══════════════════════════════════════
+        # 4. ORDER FLOW — the money signal (weight 3)
+        # ═══════════════════════════════════════
+        s = 0
 
         # Book imbalance
-        bids, asks = self.data.orderbook(50)
+        bids, asks = self.data.book(100)
         if bids and asks:
             bv = sum(float(b[1]) for b in bids)
             av = sum(float(a[1]) for a in asks)
-            tot = bv + av
-            if tot > 0:
-                imb = (bv - av) / tot
-                if imb > 0.20:
-                    of_score += 3
-                    reasons.append(f"Book heavy bids ({imb:.0%})")
-                elif imb < -0.20:
-                    of_score -= 3
-                    reasons.append(f"Book heavy asks ({abs(imb):.0%})")
-                elif imb > 0.08:
-                    of_score += 1
-                elif imb < -0.08:
-                    of_score -= 1
+            tot = bv+av
+            if tot:
+                imb = (bv-av)/tot
+                if imb > 0.25: s += 3; R.append(f"📕 Book bids {imb:.0%}")
+                elif imb < -0.25: s -= 3; R.append(f"📕 Book asks {abs(imb):.0%}")
+                elif imb > 0.10: s += 1
+                elif imb < -0.10: s -= 1
 
-        # Trade flow (aggressive buyers vs sellers)
-        trades = self.data.agg_trades(800)
+        # CVD — Cumulative Volume Delta
+        trades = self.data.agg_trades(1000)
+        cvd = _cvd(trades)
         if trades:
-            buy_q = sum(float(t["q"]) for t in trades if not t.get("m"))
-            sell_q = sum(float(t["q"]) for t in trades if t.get("m"))
-            total_q = buy_q + sell_q
-            if total_q > 0:
-                tf = (buy_q - sell_q) / total_q
-                if tf > 0.15:
-                    of_score += 3
-                    reasons.append(f"🔥 Aggressive buyers ({tf:.0%})")
-                elif tf < -0.15:
-                    of_score -= 3
-                    reasons.append(f"🔥 Aggressive sellers ({abs(tf):.0%})")
-                elif tf > 0.05:
-                    of_score += 1
-                elif tf < -0.05:
-                    of_score -= 1
+            avg_q = sum(float(t["q"]) for t in trades) / len(trades)
+            cvd_norm = cvd / (avg_q * len(trades)) if avg_q else 0
+            if cvd_norm > 0.10: s += 3; R.append(f"🔥 CVD buyers +{cvd_norm:.0%}")
+            elif cvd_norm < -0.10: s -= 3; R.append(f"🔥 CVD sellers {cvd_norm:.0%}")
+            elif cvd_norm > 0.03: s += 1
+            elif cvd_norm < -0.03: s -= 1
 
-        scores["order_flow"] = max(-10, min(10, of_score))
+        # OBV direction
+        obv = _obv_dir(c1)
+        if obv > 0: s += 1
+        elif obv < 0: s -= 1
+        S["order_flow"] = max(-10,min(10,s))
 
-        # ─────────────────────────────────────
-        # F. MULTI-TIMEFRAME
-        # ─────────────────────────────────────
-        mtf_score = 0.0
+        # ═══════════════════════════════════════
+        # 5. VOLUME (weight 2)
+        # ═══════════════════════════════════════
+        s = 0
+        if len(c1) > 20:
+            avg_v = sum(c.v for c in c1[-21:-1])/20
+            cur_v = c1[-1].v
+            vr = cur_v/avg_v if avg_v else 1
+            if vr > 2.5:
+                d = 1 if c1[-1].c>c1[-1].o else -1
+                s += 4*d; R.append(f"🔥 Volume {vr:.1f}x {'↑' if d>0 else '↓'}")
+            elif vr > 1.5:
+                d = 1 if c1[-1].c>c1[-1].o else -1
+                s += 2*d
+        S["volume"] = max(-10,min(10,s))
 
-        # 5m trend
-        if len(cl5) > 21:
-            e9_5 = _ema(cl5, 9); e21_5 = _ema(cl5, 21)
-            if e9_5[-1] > e21_5[-1]:
-                mtf_score += 2
-            else:
-                mtf_score -= 2
-            r5 = _rsi(cl5, 14)
-            if r5 > 60: mtf_score += 1
-            elif r5 < 40: mtf_score -= 1
+        # ═══════════════════════════════════════
+        # 6. MULTI-TIMEFRAME (weight 2)
+        # ═══════════════════════════════════════
+        s = 0
+        for cl, name in [(cl5,"5m"),(cl15,"15m")]:
+            if len(cl) > 21:
+                e9 = _ema(cl,9); e21 = _ema(cl,21)
+                if e9[-1]>e21[-1]: s += 2
+                else: s -= 2
+                r = _rsi(cl,14)
+                if r > 55: s += 1
+                elif r < 45: s -= 1
+        if s >= 4: R.append("🔥 Multi-TF UP")
+        elif s <= -4: R.append("🔥 Multi-TF DOWN")
+        S["multi_tf"] = max(-10,min(10,s))
 
-        # 15m trend
-        if len(cl15) > 21:
-            e9_15 = _ema(cl15, 9); e21_15 = _ema(cl15, 21)
-            if e9_15[-1] > e21_15[-1]:
-                mtf_score += 2
-            else:
-                mtf_score -= 2
-            r15 = _rsi(cl15, 14)
-            if r15 > 60: mtf_score += 1
-            elif r15 < 40: mtf_score -= 1
+        # ═══════════════════════════════════════
+        # 7. FUTURES HIDDEN DATA (weight 2.5)
+        # ═══════════════════════════════════════
+        s = 0
 
-        if mtf_score >= 4:
-            reasons.append(f"🔥 Multi-TF aligned UP")
-        elif mtf_score <= -4:
-            reasons.append(f"🔥 Multi-TF aligned DOWN")
-
-        scores["multi_tf"] = max(-10, min(10, mtf_score))
-
-        # ─────────────────────────────────────
-        # G. FUTURES SENTIMENT
-        # ─────────────────────────────────────
-        fut_score = 0.0
-
-        # Funding rate
-        fr = self.data.funding_rate()
+        # a) Funding rate — extreme = reversal signal
+        fr = self.data.funding()
         if fr is not None:
-            if fr > 0.0005:
-                fut_score -= 1  # high funding → contrarian short
-            elif fr < -0.0005:
-                fut_score += 1  # negative funding → contrarian long
+            if fr > 0.0005: s -= 1; R.append(f"Funding +{fr*100:.3f}% (longs pay)")
+            elif fr < -0.0005: s += 1; R.append(f"Funding {fr*100:.3f}% (shorts pay)")
 
-        # Taker ratio
-        tr = self.data.taker_ratio()
-        if tr is not None:
-            if tr > 0.1:
-                fut_score += 2
-                reasons.append(f"Takers buying ({tr:.0%})")
-            elif tr < -0.1:
-                fut_score -= 2
-                reasons.append(f"Takers selling ({abs(tr):.0%})")
+        # b) Taker buy/sell
+        takers = self.data.taker_buy_sell()
+        if takers:
+            latest = takers[-1]
+            bv = float(latest.get("buyVol",0))
+            sv = float(latest.get("sellVol",0))
+            tot = bv+sv
+            if tot:
+                ratio = (bv-sv)/tot
+                if ratio > 0.10: s += 3; R.append(f"🔥 Takers buying {ratio:.0%}")
+                elif ratio < -0.10: s -= 3; R.append(f"🔥 Takers selling {abs(ratio):.0%}")
+                elif ratio > 0.03: s += 1
+                elif ratio < -0.03: s -= 1
 
-        # Long/short ratio
-        ls = self.data.long_short()
-        if ls is not None:
-            if ls > 1.8:
-                fut_score -= 1  # crowded long → contrarian
-            elif ls < 0.6:
-                fut_score += 1  # crowded short → contrarian
+        # c) Long/Short ratio trend
+        ls_data = self.data.long_short_ratio()
+        if len(ls_data) >= 3:
+            ls_now = float(ls_data[-1]["longShortRatio"])
+            ls_prev = float(ls_data[-3]["longShortRatio"])
+            if ls_now > ls_prev * 1.05: s -= 1  # more longs → contrarian
+            elif ls_now < ls_prev * 0.95: s += 1  # more shorts → contrarian
+            if ls_now > 2.0: R.append(f"⚠ Crowded longs ({ls_now:.1f})")
+            elif ls_now < 0.5: R.append(f"⚠ Crowded shorts ({ls_now:.1f})")
 
-        scores["futures"] = max(-10, min(10, fut_score))
+        # d) OI change — rising OI + price up = genuine, rising OI + price down = bearish
+        oi_hist = self.data.oi_history()
+        if len(oi_hist) >= 3:
+            oi_now = float(oi_hist[-1]["sumOpenInterest"])
+            oi_prev = float(oi_hist[-3]["sumOpenInterest"])
+            oi_chg = (oi_now - oi_prev) / oi_prev * 100 if oi_prev else 0
+            price_dir = 1 if cl1[-1] > cl1[-10] else -1
+            if oi_chg > 1 and price_dir > 0:
+                s += 2; R.append(f"OI rising + price ↑ (genuine)")
+            elif oi_chg > 1 and price_dir < 0:
+                s -= 2; R.append(f"OI rising + price ↓ (bearish)")
+            elif oi_chg < -1:
+                # Falling OI = positions closing
+                s += 1 if price_dir > 0 else -1
 
-        # ═══════════════════════════════════════════════
+        # e) Spot-Futures basis
+        basis = self.data.spot_futures_spread()
+        if basis > 5: s += 1; R.append(f"Futures premium +{basis:.0f}bps")
+        elif basis < -5: s -= 1; R.append(f"Futures discount {basis:.0f}bps")
+
+        # f) Liquidation proxy (volume spike on futures)
+        liq_ratio, taker_buy_pct = self.data.liquidations_proxy()
+        if liq_ratio > 3:
+            if taker_buy_pct > 0.6:
+                s += 2; R.append(f"🔥 Liq cascade — shorts squeezed")
+            elif taker_buy_pct < 0.4:
+                s -= 2; R.append(f"🔥 Liq cascade — longs rekt")
+
+        S["futures"] = max(-10,min(10,s))
+
+        # ═══════════════════════════════════════
         # WEIGHTED COMBINATION
-        # ═══════════════════════════════════════════════
-        weights = {
-            "trend":      3.0,   # trend is king for continuation
-            "momentum":   3.0,   # short-term momentum matters
-            "mean_rev":   1.5,   # mean reversion is counter-trend
-            "volume":     2.0,   # volume confirms moves
-            "order_flow": 2.5,   # real-time order flow is powerful
-            "multi_tf":   2.0,   # multi-timeframe alignment
-            "futures":    1.0,   # futures data is supplementary
-        }
+        # ═══════════════════════════════════════
+        W = {"trend":3, "momentum":3, "mean_rev":1.5,
+             "order_flow":3, "volume":2, "multi_tf":2, "futures":2.5}
 
-        raw = sum(scores[k] * weights[k] for k in scores)
-        max_possible = sum(10 * w for w in weights.values())  # 150
+        raw = sum(S[k]*W[k] for k in S)
+        max_raw = sum(10*w for w in W.values())  # 170
 
-        # Convert to 50-100 scale
-        # raw ranges from -max_possible to +max_possible
-        # We want: 0 raw → 50%, max_possible → 100%
+        # Map to 50-99
         abs_raw = abs(raw)
-        confidence = 50 + (abs_raw / max_possible) * 50
-
+        confidence = 50 + (abs_raw / max_raw) * 49
         direction = "UP" if raw > 0 else "DOWN"
 
-        # ─── Adjustments ───
+        # Conflict penalty
+        if S.get("trend",0) * S.get("mean_rev",0) < -15:
+            confidence *= 0.90
 
-        # CONFLICT PENALTY: if trend and mean_rev disagree strongly,
-        # reduce confidence (market is confused)
-        if scores["trend"] * scores["mean_rev"] < -15:
-            confidence *= 0.88
-            reasons.append("⚠ Trend vs mean-reversion conflict")
+        # Agreement bonus
+        agree = sum(1 for v in S.values() if (v>0)==(raw>0) and abs(v)>2)
+        if agree >= 5: confidence = min(99, confidence * 1.05)
 
-        # MOMENTUM + ORDER FLOW agreement bonus
-        if scores["momentum"] * scores["order_flow"] > 10:
-            confidence = min(98, confidence * 1.05)
-            reasons.append("✅ Momentum + order flow aligned")
+        confidence = max(50, min(99, confidence))
 
-        # LOW ADX penalty (no clear trend)
-        if adx_val < 15:
-            confidence *= 0.93
-            reasons.append(f"⚠ Low ADX ({adx_val:.0f}) — no trend")
+        # Score summary
+        parts = " ".join(f"{k[0].upper()}:{S[k]:+.0f}" for k in S)
+        R.append(f"[{parts} = {raw:+.0f}/{max_raw:.0f}]")
 
-        # ATR check — high volatility adds uncertainty
-        atr = _atr(c1)
-        atr_pct = atr / price * 100
-        if atr_pct > 0.15:
-            confidence *= 0.95
-
-        confidence = max(30, min(98, confidence))
-
-        # Tier
-        if confidence >= 90: tier = "SNIPER"
-        elif confidence >= 80: tier = "SIGNAL"
-        elif confidence >= 70: tier = "WATCH"
-        else: tier = "SKIP"
-
-        # Add breakdown
-        reasons.append(f"[Trend:{scores['trend']:+.0f} Mom:{scores['momentum']:+.0f} "
-                       f"MR:{scores['mean_rev']:+.0f} Vol:{scores['volume']:+.0f} "
-                       f"OF:{scores['order_flow']:+.0f} MTF:{scores['multi_tf']:+.0f} "
-                       f"Fut:{scores['futures']:+.0f}]")
-        reasons.append(f"Raw={raw:+.1f}/{max_possible:.0f}")
-
-        # Calculate next window
+        # Window
         now = datetime.now(tz=timezone.utc)
         m = now.minute
-        next5 = ((m//5)+1)*5
-        if next5 >= 60:
-            ws = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-        else:
-            ws = now.replace(minute=next5, second=0, microsecond=0)
+        n5 = ((m//5)+1)*5
+        if n5>=60: ws = now.replace(minute=0,second=0,microsecond=0)+timedelta(hours=1)
+        else: ws = now.replace(minute=n5,second=0,microsecond=0)
 
         return Prediction(
             direction=direction,
-            confidence=round(confidence, 1),
-            tier=tier,
+            confidence=round(confidence,1),
             price=price,
-            reasons=reasons,
-            scores=scores,
+            reasons=R,
+            scores=S,
             window_start=ws,
-            window_end=ws + timedelta(minutes=5),
+            window_end=ws+timedelta(minutes=5),
         )
 
 
-# ═══════════════════════════════════════════════════════════════
-# TELEGRAM
-# ═══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════
+# TELEGRAM — sends EVERY prediction
+# ═══════════════════════════════════════════════════════
 
-class Telegram:
+class TG:
     def __init__(self):
         self.c = httpx.Client(timeout=10)
-        self.sent: set = set()
+        self.sent = set()
 
     def send(self, p: Prediction):
         key = p.window_start.isoformat()
-        if key in self.sent or p.confidence < MIN_CONFIDENCE:
-            return
+        if key in self.sent: return
         self.sent.add(key)
 
-        tier_label = {"SNIPER":"🎯🔥 SNIPER","SIGNAL":"🟢 STRONG",
-                      "WATCH":"🟡 WATCH"}.get(p.tier, p.tier)
+        # Tier
+        if p.confidence >= 85: tier = "🎯🔥 SNIPER"
+        elif p.confidence >= 75: tier = "🟢 STRONG"
+        elif p.confidence >= 65: tier = "🟡 LEAN"
+        else: tier = "⚪ COIN FLIP"
+
         d = "⬆️ UP" if p.direction=="UP" else "⬇️ DOWN"
         bar = "█"*int(p.confidence/10) + "░"*(10-int(p.confidence/10))
 
-        ws_et = p.window_start - timedelta(hours=5)
-        we_et = p.window_end   - timedelta(hours=5)
-
-        rl = "\n".join(f"  • {r}" for r in p.reasons if not r.startswith("[") and not r.startswith("Raw"))
-
+        ws = p.window_start - timedelta(hours=5)
+        we = p.window_end - timedelta(hours=5)
         slug = f"btc-updown-5m-{int(p.window_start.timestamp())}"
 
-        msg = f"""{tier_label}
+        # Reasons (filtered)
+        rl = "\n".join(f"  • {r}" for r in p.reasons if not r.startswith("["))
+        # Score line
+        sc = [r for r in p.reasons if r.startswith("[")]
+        sc_line = sc[0] if sc else ""
 
-{d}  |  Confidence: {p.confidence}%
+        msg = f"""{tier}
+
+{d}  |  {p.confidence}%
 [{bar}]
 
-⏰ {ws_et.strftime('%I:%M')}-{we_et.strftime('%I:%M %p')} ET
+⏰ {ws.strftime('%I:%M')}-{we.strftime('%I:%M %p')} ET
 💰 BTC: ${p.price:,.2f}
 
-📋 Why:
 {rl}
 
-🔗 https://polymarket.com/event/{slug}
+{sc_line}
 
-⚡ Buy {p.direction} NOW"""
+🔗 https://polymarket.com/event/{slug}"""
 
         for cid in TELEGRAM_CHAT_IDS:
             try:
                 self.c.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                            json={"chat_id": cid, "text": msg})
-            except Exception as e:
-                print(f"    ⚠ TG: {e}")
-
-        print(f"    📢 [{p.tier}] {p.direction} {p.confidence}% → Telegram ✅")
+                            json={"chat_id":cid,"text":msg})
+            except:
+                pass
+        print(f"    📢 {tier} {d} {p.confidence}% → TG ✅")
 
     def cleanup(self):
-        if len(self.sent) > 300:
-            self.sent = set(list(self.sent)[-50:])
+        if len(self.sent)>500: self.sent = set(list(self.sent)[-50:])
 
 
-# ═══════════════════════════════════════════════════════════════
-# MAIN LOOP
-# ═══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════
+# MAIN — signal every 5 minutes, NO exceptions
+# ═══════════════════════════════════════════════════════
 
 def main():
     print("="*60)
-    print("  🎯 BTC 5-MIN DIRECTION PREDICTOR v3")
-    print("  Pure Technical Analysis — Predicts BTC direction")
-    print("  Signals 60s before each 5-min window")
-    print(f"  Min confidence: {MIN_CONFIDENCE}%")
+    print("  🎯 BTC 5-MIN PREDICTOR v4 — ALWAYS SIGNALS")
+    print("  Deep data: spot + futures + OI + liquidations + CVD")
+    print("  Predicts 60s before every 5-min window")
     print("="*60)
 
-    engine = PredictionEngine()
-    tg     = Telegram()
-    scan   = 0
-    stats  = {"sent": 0, "skip": 0}
+    brain = Brain()
+    tg = TG()
+    scan = 0
 
     while True:
         try:
             scan += 1
             now = datetime.now(tz=timezone.utc)
 
-            # Next 5-min window
             m = now.minute
-            next5 = ((m//5)+1)*5
-            if next5 >= 60:
-                nw = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-            else:
-                nw = now.replace(minute=next5, second=0, microsecond=0)
+            n5 = ((m//5)+1)*5
+            if n5>=60: nw = now.replace(minute=0,second=0,microsecond=0)+timedelta(hours=1)
+            else: nw = now.replace(minute=n5,second=0,microsecond=0)
 
-            secs_to = (nw - now).total_seconds()
+            secs = (nw-now).total_seconds()
             slug = f"btc-updown-5m-{int(nw.timestamp())}"
 
-            print(f"\n  [{now.strftime('%H:%M:%S')}] Scan #{scan} | "
-                  f"Next window {nw.strftime('%H:%M')} in {secs_to:.0f}s")
+            print(f"\n  [{now.strftime('%H:%M:%S')}] #{scan} | Next {nw.strftime('%H:%M')} in {secs:.0f}s")
 
-            # Only analyze when close to window start
-            if secs_to > SIGNAL_LEAD_TIME:
-                wait = min(secs_to - SIGNAL_LEAD_TIME, SCAN_INTERVAL)
-                print(f"    ⏳ Waiting {wait:.0f}s...")
+            # Already sent for this window?
+            if nw.isoformat() in tg.sent:
+                print(f"    ✅ Done, waiting for next")
+                time.sleep(max(secs+2, 10))
+                continue
+
+            # Wait until LEAD_TIME before window
+            if secs > LEAD_TIME:
+                wait = min(secs - LEAD_TIME, 30)
+                print(f"    ⏳ {wait:.0f}s...")
                 time.sleep(wait)
                 continue
 
-            # Already sent?
-            if nw.isoformat() in tg.sent:
-                print(f"    ✅ Already handled")
-                time.sleep(max(secs_to + 5, SCAN_INTERVAL))
-                continue
+            # ── GO! Full analysis ──
+            print(f"    🔍 Analyzing...")
+            pred = brain.predict()
 
-            # ── ANALYZE ──
-            print(f"    🔍 Full analysis...")
-            pred = engine.predict()
+            print(f"    📊 {pred.direction} | {pred.confidence}% | ${pred.price:,.2f}")
+            for r in pred.reasons[:8]:
+                if not r.startswith("["): print(f"       {r}")
 
-            if not pred:
-                print(f"    ⚠ No data")
-                time.sleep(SCAN_INTERVAL)
-                continue
-
-            print(f"    📊 {pred.direction} | {pred.confidence}% | {pred.tier}")
-            for r in pred.reasons[:6]:
-                print(f"       {r}")
-
-            if pred.tier != "SKIP":
-                tg.send(pred)
-                stats["sent"] += 1
-            else:
-                stats["skip"] += 1
-                print(f"    ⏭ SKIP ({pred.confidence}% < {MIN_CONFIDENCE}%)")
-
-            total = stats["sent"] + stats["skip"]
-            print(f"    📈 {stats['sent']}/{total} signaled ({stats['sent']/total*100:.0f}%)")
-
+            # ALWAYS SEND
+            tg.send(pred)
             tg.cleanup()
+
             # Wait for next window
-            time.sleep(max(secs_to + 5, SCAN_INTERVAL))
+            time.sleep(max(secs+2, 10))
 
         except KeyboardInterrupt:
             print("\n  Stopped.")
